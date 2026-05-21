@@ -13,9 +13,9 @@
   --accent:#5b4cf5;--accent2:#e0449a;--accent3:#00b894;--accent4:#f39c12;
   --text:#1a1a2e;--muted:#8888aa;--glow:rgba(91,76,245,0.25);
 }
-html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:'Syne',sans-serif;color:var(--text);}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:'Syne',sans-serif;color:var(--text);touch-action:none;overscroll-behavior:none;}
 #canvas-container{position:fixed;inset:0;}
-canvas{display:block;width:100%;height:100%;}
+canvas{display:block;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none;}
 body::before{content:'';position:fixed;inset:0;pointer-events:none;
   background:radial-gradient(circle at 20% 20%,rgba(91,76,245,0.05) 0%,transparent 50%),
              radial-gradient(circle at 80% 80%,rgba(224,68,154,0.05) 0%,transparent 50%);}
@@ -806,10 +806,12 @@ function redrawAll(){
 }
 
 /* ═══════════════════════════════════════
-   INPUT HANDLING
+   INPUT HANDLING — ROBUST TOUCH + POINTER
 ═══════════════════════════════════════ */
 let isDrawing=false,isPanning=false,spaceDown=false;
 let panStart={x:0,y:0},camStart={x:0,y:0},lastPoint=null;
+// Track active pointer id so we ignore secondary fingers while drawing
+let activePointerId=null;
 
 function shouldAdd(wp){
   if(!lastPoint)return true;
@@ -818,51 +820,39 @@ function shouldAdd(wp){
   return Math.sqrt(dx*dx+dy*dy)>md;
 }
 
-canvas.addEventListener('pointerdown',e=>{
-  if(spaceDown||e.button===1){isPanning=true;panStart={x:e.clientX,y:e.clientY};camStart={x:cam.x,y:cam.y};canvas.style.cursor='grabbing';return;}
-  if(e.button!==0)return;
-
-  // Text tool
+function startDraw(cx,cy,pointerId){
+  if(activePointerId!==null&&activePointerId!==pointerId)return; // ignore second finger while drawing
+  activePointerId=pointerId;
   if(activeTool==='text'){
     commitText();
-    textPos=s2w(e.clientX,e.clientY);
+    textPos=s2w(cx,cy);
     const wrap=document.getElementById('text-input-wrap');
     const inp=document.getElementById('text-input');
-    wrap.style.left=e.clientX+'px';wrap.style.top=e.clientY+'px';
+    wrap.style.left=cx+'px';wrap.style.top=cy+'px';
     wrap.classList.add('show');
-    inp.style.fontSize=Math.max(12,brushSize*3*cam.zoom)+'px';
-    inp.style.color=brushColor;inp.value='';
-    inp.style.width='200px';
+    inp.style.fontSize=Math.max(16,brushSize*3*cam.zoom)+'px';
+    inp.style.color=brushColor;inp.value='';inp.style.width='220px';
     setTimeout(()=>inp.focus(),10);
     return;
   }
-
-  saveSnap(); isDrawing=true; lastPoint=null;
-  const wp=s2w(e.clientX,e.clientY);
-
-  if(['rect','circle','line','arrow'].includes(activeTool)){
-    shapeStart=wp; shapePreview=null; return;
-  }
-
+  saveSnap();isDrawing=true;lastPoint=null;
+  const wp=s2w(cx,cy);
+  if(['rect','circle','line','arrow'].includes(activeTool)){shapeStart=wp;shapePreview=null;return;}
   currentStroke={tool:activeTool,color:brushColor,size:brushSize,alpha:1,threshold:WEB_THRESHOLD,smoothLevel,points:[{x:wp.x,y:wp.y}]};
   lastPoint=wp;
   if(activeTool==='web')webPoints=[{x:wp.x,y:wp.y}];
-
-  // Timelapse: record frame
   tlRecordFrame();
-});
+}
 
-canvas.addEventListener('pointermove',e=>{
-  const wp=s2w(e.clientX,e.clientY);
+function moveDraw(cx,cy,pointerId){
+  if(activePointerId!==null&&activePointerId!==pointerId)return;
+  const wp=s2w(cx,cy);
   document.getElementById('coord-label').textContent=`${Math.round(wp.x)}, ${Math.round(wp.y)}`;
-  if(isPanning){cam.x=camStart.x+(e.clientX-panStart.x);cam.y=camStart.y+(e.clientY-panStart.y);redrawAll();return;}
-
-  // Shape preview
+  if(isPanning){cam.x=camStart.x+(cx-panStart.x);cam.y=camStart.y+(cy-panStart.y);redrawAll();return;}
   if(isDrawing&&shapeStart&&['rect','circle','line','arrow'].includes(activeTool)){
     shapePreview={tool:activeTool,color:brushColor,size:brushSize,alpha:0.8,p1:shapeStart,p2:wp};
     redrawAll();return;
   }
-
   if(!isDrawing||!currentStroke)return;
   if(['pen','mirror','neon','eraser'].includes(activeTool)){
     if(shouldAdd(wp)){currentStroke.points.push({x:wp.x,y:wp.y});lastPoint=wp;}
@@ -873,30 +863,134 @@ canvas.addEventListener('pointermove',e=>{
     currentStroke.points.push({x:wp.x,y:wp.y});lastPoint=wp;
   }
   redrawAll();
-});
+}
 
-canvas.addEventListener('pointerup',e=>{
+function endDraw(cx,cy,pointerId){
+  if(activePointerId!==null&&activePointerId!==pointerId)return;
+  activePointerId=null;
   if(isPanning){isPanning=false;canvas.style.cursor=spaceDown?'grab':'crosshair';return;}
-  if(!isDrawing)return;isDrawing=false;
-
-  const wp=s2w(e.clientX,e.clientY);
-
-  // Commit shape
+  if(!isDrawing){return;}
+  isDrawing=false;
   if(shapeStart&&['rect','circle','line','arrow'].includes(activeTool)){
-    const wp2=s2w(e.clientX,e.clientY);
+    const wp2=s2w(cx,cy);
     const s={tool:activeTool,color:brushColor,size:brushSize,alpha:1,p1:shapeStart,p2:wp2};
     getActiveLayer().strokes.push(s);
-    shapeStart=null;shapePreview=null;tlRecordFrame();redrawAll();isDrawing=false;return;
+    shapeStart=null;shapePreview=null;tlRecordFrame();redrawAll();return;
   }
-
   if(currentStroke&&currentStroke.points.length>0)getActiveLayer().strokes.push(currentStroke);
   currentStroke=null;webPoints=[];lastPoint=null;
   tlRecordFrame();redrawAll();
-});
+}
 
-canvas.addEventListener('pointerleave',()=>{
-  if(isDrawing&&currentStroke){getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;}
-});
+// ── Pointer Events (desktop + stylus) ──
+canvas.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  if(e.pointerType==='touch'){return;} // handled by touch events below
+  if(spaceDown||e.button===1){isPanning=true;panStart={x:e.clientX,y:e.clientY};camStart={x:cam.x,y:cam.y};canvas.style.cursor='grabbing';return;}
+  if(e.button!==0)return;
+  canvas.setPointerCapture(e.pointerId);
+  startDraw(e.clientX,e.clientY,e.pointerId);
+},{passive:false});
+
+canvas.addEventListener('pointermove',e=>{
+  if(e.pointerType==='touch')return;
+  moveDraw(e.clientX,e.clientY,e.pointerId);
+},{passive:false});
+
+canvas.addEventListener('pointerup',e=>{
+  if(e.pointerType==='touch')return;
+  endDraw(e.clientX,e.clientY,e.pointerId);
+},{passive:false});
+
+canvas.addEventListener('pointercancel',e=>{
+  if(e.pointerType==='touch')return;
+  endDraw(e.clientX,e.clientY,e.pointerId);
+},{passive:false});
+
+// ── Touch Events (mobile) — bypass browser scroll interception ──
+let touchDrawId=null; // track which touch finger is drawing
+let touchPanId=null;
+let touch2Start=null; // second finger for pinch
+
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  if(e.touches.length===1){
+    const t=e.touches[0];
+    touchDrawId=t.identifier;
+    touchPanId=null;touch2Start=null;
+    // Two-finger pan mode: if spaceDown or select tool, pan
+    if(activeTool==='select'){
+      isPanning=true;panStart={x:t.clientX,y:t.clientY};camStart={x:cam.x,y:cam.y};
+      touchPanId=t.identifier;touchDrawId=null;return;
+    }
+    startDraw(t.clientX,t.clientY,t.identifier);
+  } else if(e.touches.length===2){
+    // Two fingers = pinch zoom / pan — cancel any drawing first
+    if(isDrawing&&currentStroke){
+      getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;activePointerId=null;
+    }
+    touchDrawId=null;
+    const t1=e.touches[0],t2=e.touches[1];
+    const dx=t1.clientX-t2.clientX,dy=t1.clientY-t2.clientY;
+    touch2Start={dist:Math.sqrt(dx*dx+dy*dy),midX:(t1.clientX+t2.clientX)/2,midY:(t1.clientY+t2.clientY)/2,camX:cam.x,camY:cam.y,zoom:cam.zoom};
+  }
+},{passive:false});
+
+canvas.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  if(e.touches.length===2&&touch2Start){
+    // Pinch zoom + pan simultaneously
+    const t1=e.touches[0],t2=e.touches[1];
+    const dx=t1.clientX-t2.clientX,dy=t1.clientY-t2.clientY;
+    const dist=Math.sqrt(dx*dx+dy*dy);
+    const midX=(t1.clientX+t2.clientX)/2,midY=(t1.clientY+t2.clientY)/2;
+    const scale=dist/touch2Start.dist;
+    const newZoom=Math.min(Math.max(touch2Start.zoom*scale,0.05),30);
+    const midX=(t1.clientX+t2.clientX)/2,midY=(t1.clientY+t2.clientY)/2;
+    const panDx=midX-touch2Start.midX,panDy=midY-touch2Start.midY;
+    cam.zoom=newZoom;
+    cam.x=touch2Start.camX+(midX-touch2Start.midX)+(touch2Start.midX-touch2Start.camX)*(1-scale)+panDx*(scale-1)*0;
+    cam.y=touch2Start.camY+(midY-touch2Start.midY)+(touch2Start.midY-touch2Start.camY)*(1-scale)+panDy*(scale-1)*0;
+    // Cleaner: zoom toward midpoint
+    cam.x=midX-(touch2Start.midX-touch2Start.camX)*scale+panDx;
+    cam.y=midY-(touch2Start.midY-touch2Start.camY)*scale+panDy;
+    document.getElementById('zoom-label').textContent=Math.round(cam.zoom*100)+'%';
+    redrawAll();return;
+  }
+  if(e.touches.length===1&&touchDrawId!==null){
+    // Find the right touch
+    let t=null;
+    for(let i=0;i<e.touches.length;i++){if(e.touches[i].identifier===touchDrawId){t=e.touches[i];break;}}
+    if(!t)return;
+    if(touchPanId!==null){
+      cam.x=camStart.x+(t.clientX-panStart.x);cam.y=camStart.y+(t.clientY-panStart.y);redrawAll();return;
+    }
+    moveDraw(t.clientX,t.clientY,touchDrawId);
+  }
+},{passive:false});
+
+canvas.addEventListener('touchend',e=>{
+  e.preventDefault();
+  // Check if our drawing touch ended
+  let drawTouchEnded=true;
+  for(let i=0;i<e.touches.length;i++){if(e.touches[i].identifier===touchDrawId){drawTouchEnded=false;break;}}
+  if(drawTouchEnded&&touchDrawId!==null){
+    // Get coords from changedTouches
+    let t=null;
+    for(let i=0;i<e.changedTouches.length;i++){if(e.changedTouches[i].identifier===touchDrawId){t=e.changedTouches[i];break;}}
+    const cx=t?t.clientX:0,cy=t?t.clientY:0;
+    endDraw(cx,cy,touchDrawId);
+    touchDrawId=null;
+  }
+  if(e.touches.length<2)touch2Start=null;
+  if(e.touches.length===0){touchDrawId=null;touchPanId=null;}
+},{passive:false});
+
+canvas.addEventListener('touchcancel',e=>{
+  e.preventDefault();
+  if(isDrawing&&currentStroke){getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;activePointerId=null;}
+  touchDrawId=null;touchPanId=null;touch2Start=null;
+},{passive:false});
 
 canvas.addEventListener('wheel',e=>{
   e.preventDefault();const f=e.deltaY<0?1.08:0.93;
@@ -1401,35 +1495,7 @@ document.getElementById('m-btn-clear').addEventListener('click',()=>{saveSnap();
 document.getElementById('m-btn-layers').addEventListener('click',()=>{toggleLayers();closeDrawer();});
 document.getElementById('m-btn-tl').addEventListener('click',()=>{openTimelapse();closeDrawer();});
 
-// Touch pinch-to-zoom
-let touches={}, lastDist=null;
-canvas.addEventListener('touchstart',e=>{
-  if(e.touches.length===2){
-    e.preventDefault();
-    const dx=e.touches[0].clientX-e.touches[1].clientX;
-    const dy=e.touches[0].clientY-e.touches[1].clientY;
-    lastDist=Math.sqrt(dx*dx+dy*dy);
-  }
-},{passive:false});
-canvas.addEventListener('touchmove',e=>{
-  if(e.touches.length===2){
-    e.preventDefault();
-    const dx=e.touches[0].clientX-e.touches[1].clientX;
-    const dy=e.touches[0].clientY-e.touches[1].clientY;
-    const dist=Math.sqrt(dx*dx+dy*dy);
-    if(lastDist){
-      const f=dist/lastDist;
-      const mx=(e.touches[0].clientX+e.touches[1].clientX)/2;
-      const my=(e.touches[0].clientY+e.touches[1].clientY)/2;
-      cam.x=mx-(mx-cam.x)*f;
-      cam.y=my-(my-cam.y)*f;
-      cam.zoom=Math.min(Math.max(cam.zoom*f,0.05),30);
-      redrawAll();
-    }
-    lastDist=dist;
-  }
-},{passive:false});
-canvas.addEventListener('touchend',e=>{if(e.touches.length<2)lastDist=null;});
+// Touch pinch handled in main touch events above
 
 // Sync rec button on mobile
 const origToggleRecord=toggleRecord;
