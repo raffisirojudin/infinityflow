@@ -13,7 +13,7 @@
   --accent:#5b4cf5;--accent2:#e0449a;--accent3:#00b894;--accent4:#f39c12;
   --text:#1a1a2e;--muted:#8888aa;--glow:rgba(91,76,245,0.25);
 }
-html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:'Syne',sans-serif;color:var(--text);touch-action:none;overscroll-behavior:none;}
+html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:'Syne',sans-serif;color:var(--text);overscroll-behavior:none;}
 #canvas-container{position:fixed;inset:0;}
 canvas{display:block;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none;}
 body::before{content:'';position:fixed;inset:0;pointer-events:none;
@@ -806,12 +806,14 @@ function redrawAll(){
 }
 
 /* ═══════════════════════════════════════
-   INPUT HANDLING — ROBUST TOUCH + POINTER
+   INPUT HANDLING — CLEAN UNIFIED
 ═══════════════════════════════════════ */
 let isDrawing=false,isPanning=false,spaceDown=false;
 let panStart={x:0,y:0},camStart={x:0,y:0},lastPoint=null;
-// Track active pointer id so we ignore secondary fingers while drawing
-let activePointerId=null;
+// Pinch state
+let pinchStart=null;
+// Active drawing touch id (mobile)
+let activeTouchId=null;
 
 function shouldAdd(wp){
   if(!lastPoint)return true;
@@ -820,9 +822,8 @@ function shouldAdd(wp){
   return Math.sqrt(dx*dx+dy*dy)>md;
 }
 
-function startDraw(cx,cy,pointerId){
-  if(activePointerId!==null&&activePointerId!==pointerId)return; // ignore second finger while drawing
-  activePointerId=pointerId;
+/* ─── Shared draw logic ─── */
+function onDrawStart(cx,cy){
   if(activeTool==='text'){
     commitText();
     textPos=s2w(cx,cy);
@@ -844,8 +845,7 @@ function startDraw(cx,cy,pointerId){
   tlRecordFrame();
 }
 
-function moveDraw(cx,cy,pointerId){
-  if(activePointerId!==null&&activePointerId!==pointerId)return;
+function onDrawMove(cx,cy){
   const wp=s2w(cx,cy);
   document.getElementById('coord-label').textContent=`${Math.round(wp.x)}, ${Math.round(wp.y)}`;
   if(isPanning){cam.x=camStart.x+(cx-panStart.x);cam.y=camStart.y+(cy-panStart.y);redrawAll();return;}
@@ -865,11 +865,9 @@ function moveDraw(cx,cy,pointerId){
   redrawAll();
 }
 
-function endDraw(cx,cy,pointerId){
-  if(activePointerId!==null&&activePointerId!==pointerId)return;
-  activePointerId=null;
-  if(isPanning){isPanning=false;canvas.style.cursor=spaceDown?'grab':'crosshair';return;}
-  if(!isDrawing){return;}
+function onDrawEnd(cx,cy){
+  isPanning=false;
+  if(!isDrawing){isDrawing=false;return;}
   isDrawing=false;
   if(shapeStart&&['rect','circle','line','arrow'].includes(activeTool)){
     const wp2=s2w(cx,cy);
@@ -877,119 +875,101 @@ function endDraw(cx,cy,pointerId){
     getActiveLayer().strokes.push(s);
     shapeStart=null;shapePreview=null;tlRecordFrame();redrawAll();return;
   }
-  if(currentStroke&&currentStroke.points.length>0)getActiveLayer().strokes.push(currentStroke);
+  if(currentStroke&&currentStroke.points&&currentStroke.points.length>0)getActiveLayer().strokes.push(currentStroke);
   currentStroke=null;webPoints=[];lastPoint=null;
   tlRecordFrame();redrawAll();
 }
 
-// ── Pointer Events (desktop + stylus) ──
-canvas.addEventListener('pointerdown',e=>{
-  e.preventDefault();
-  if(e.pointerType==='touch'){return;} // handled by touch events below
-  if(spaceDown||e.button===1){isPanning=true;panStart={x:e.clientX,y:e.clientY};camStart={x:cam.x,y:cam.y};canvas.style.cursor='grabbing';return;}
+/* ─── MOUSE (desktop) ─── */
+canvas.addEventListener('mousedown',e=>{
+  if(e.button===1||(e.button===0&&spaceDown)){
+    isPanning=true;panStart={x:e.clientX,y:e.clientY};camStart={x:cam.x,y:cam.y};
+    canvas.style.cursor='grabbing';return;
+  }
   if(e.button!==0)return;
-  canvas.setPointerCapture(e.pointerId);
-  startDraw(e.clientX,e.clientY,e.pointerId);
-},{passive:false});
+  onDrawStart(e.clientX,e.clientY);
+});
+canvas.addEventListener('mousemove',e=>{
+  if(isPanning){cam.x=camStart.x+(e.clientX-panStart.x);cam.y=camStart.y+(e.clientY-panStart.y);redrawAll();return;}
+  if(isDrawing||shapeStart)onDrawMove(e.clientX,e.clientY);
+  else document.getElementById('coord-label').textContent=`${Math.round(s2w(e.clientX,e.clientY).x)}, ${Math.round(s2w(e.clientX,e.clientY).y)}`;
+});
+canvas.addEventListener('mouseup',e=>{
+  if(e.button!==0&&e.button!==1)return;
+  if(isPanning){isPanning=false;canvas.style.cursor=spaceDown?'grab':'crosshair';return;}
+  onDrawEnd(e.clientX,e.clientY);
+});
+canvas.addEventListener('mouseleave',()=>{
+  if(isDrawing&&currentStroke){getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;redrawAll();}
+});
 
-canvas.addEventListener('pointermove',e=>{
-  if(e.pointerType==='touch')return;
-  moveDraw(e.clientX,e.clientY,e.pointerId);
-},{passive:false});
-
-canvas.addEventListener('pointerup',e=>{
-  if(e.pointerType==='touch')return;
-  endDraw(e.clientX,e.clientY,e.pointerId);
-},{passive:false});
-
-canvas.addEventListener('pointercancel',e=>{
-  if(e.pointerType==='touch')return;
-  endDraw(e.clientX,e.clientY,e.pointerId);
-},{passive:false});
-
-// ── Touch Events (mobile) — bypass browser scroll interception ──
-let touchDrawId=null; // track which touch finger is drawing
-let touchPanId=null;
-let touch2Start=null; // second finger for pinch
-
+/* ─── TOUCH (mobile) ─── */
 canvas.addEventListener('touchstart',e=>{
   e.preventDefault();
-  if(e.touches.length===1){
+  if(e.touches.length===1&&activeTouchId===null){
     const t=e.touches[0];
-    touchDrawId=t.identifier;
-    touchPanId=null;touch2Start=null;
-    // Two-finger pan mode: if spaceDown or select tool, pan
-    if(activeTool==='select'){
-      isPanning=true;panStart={x:t.clientX,y:t.clientY};camStart={x:cam.x,y:cam.y};
-      touchPanId=t.identifier;touchDrawId=null;return;
-    }
-    startDraw(t.clientX,t.clientY,t.identifier);
-  } else if(e.touches.length===2){
-    // Two fingers = pinch zoom / pan — cancel any drawing first
+    activeTouchId=t.identifier;
+    pinchStart=null;
+    onDrawStart(t.clientX,t.clientY);
+  } else if(e.touches.length>=2){
+    // Cancel any current draw
     if(isDrawing&&currentStroke){
-      getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;activePointerId=null;
+      getActiveLayer().strokes.push(currentStroke);
+      currentStroke=null;isDrawing=false;
     }
-    touchDrawId=null;
+    activeTouchId=null;
     const t1=e.touches[0],t2=e.touches[1];
     const dx=t1.clientX-t2.clientX,dy=t1.clientY-t2.clientY;
-    touch2Start={dist:Math.sqrt(dx*dx+dy*dy),midX:(t1.clientX+t2.clientX)/2,midY:(t1.clientY+t2.clientY)/2,camX:cam.x,camY:cam.y,zoom:cam.zoom};
+    pinchStart={
+      dist:Math.sqrt(dx*dx+dy*dy),
+      midX:(t1.clientX+t2.clientX)/2,midY:(t1.clientY+t2.clientY)/2,
+      camX:cam.x,camY:cam.y,zoom:cam.zoom
+    };
   }
 },{passive:false});
 
 canvas.addEventListener('touchmove',e=>{
   e.preventDefault();
-  if(e.touches.length===2&&touch2Start){
-    // Pinch zoom + pan simultaneously
+  if(e.touches.length>=2&&pinchStart){
     const t1=e.touches[0],t2=e.touches[1];
     const dx=t1.clientX-t2.clientX,dy=t1.clientY-t2.clientY;
     const dist=Math.sqrt(dx*dx+dy*dy);
+    const scale=dist/pinchStart.dist;
+    const newZoom=Math.min(Math.max(pinchStart.zoom*scale,0.05),30);
     const midX=(t1.clientX+t2.clientX)/2,midY=(t1.clientY+t2.clientY)/2;
-    const scale=dist/touch2Start.dist;
-    const newZoom=Math.min(Math.max(touch2Start.zoom*scale,0.05),30);
-    const midX=(t1.clientX+t2.clientX)/2,midY=(t1.clientY+t2.clientY)/2;
-    const panDx=midX-touch2Start.midX,panDy=midY-touch2Start.midY;
+    const panDx=midX-pinchStart.midX,panDy=midY-pinchStart.midY;
     cam.zoom=newZoom;
-    cam.x=touch2Start.camX+(midX-touch2Start.midX)+(touch2Start.midX-touch2Start.camX)*(1-scale)+panDx*(scale-1)*0;
-    cam.y=touch2Start.camY+(midY-touch2Start.midY)+(touch2Start.midY-touch2Start.camY)*(1-scale)+panDy*(scale-1)*0;
-    // Cleaner: zoom toward midpoint
-    cam.x=midX-(touch2Start.midX-touch2Start.camX)*scale+panDx;
-    cam.y=midY-(touch2Start.midY-touch2Start.camY)*scale+panDy;
+    cam.x=midX-(pinchStart.midX-pinchStart.camX)*scale+panDx;
+    cam.y=midY-(pinchStart.midY-pinchStart.camY)*scale+panDy;
     document.getElementById('zoom-label').textContent=Math.round(cam.zoom*100)+'%';
     redrawAll();return;
   }
-  if(e.touches.length===1&&touchDrawId!==null){
-    // Find the right touch
+  if(e.touches.length===1&&activeTouchId!==null){
     let t=null;
-    for(let i=0;i<e.touches.length;i++){if(e.touches[i].identifier===touchDrawId){t=e.touches[i];break;}}
-    if(!t)return;
-    if(touchPanId!==null){
-      cam.x=camStart.x+(t.clientX-panStart.x);cam.y=camStart.y+(t.clientY-panStart.y);redrawAll();return;
-    }
-    moveDraw(t.clientX,t.clientY,touchDrawId);
+    for(let i=0;i<e.touches.length;i++){if(e.touches[i].identifier===activeTouchId){t=e.touches[i];break;}}
+    if(t)onDrawMove(t.clientX,t.clientY);
   }
 },{passive:false});
 
 canvas.addEventListener('touchend',e=>{
   e.preventDefault();
-  // Check if our drawing touch ended
-  let drawTouchEnded=true;
-  for(let i=0;i<e.touches.length;i++){if(e.touches[i].identifier===touchDrawId){drawTouchEnded=false;break;}}
-  if(drawTouchEnded&&touchDrawId!==null){
-    // Get coords from changedTouches
+  if(e.touches.length<2)pinchStart=null;
+  // Check if our drawing finger lifted
+  let ourTouchGone=true;
+  for(let i=0;i<e.touches.length;i++){if(e.touches[i].identifier===activeTouchId){ourTouchGone=false;break;}}
+  if(ourTouchGone&&activeTouchId!==null){
     let t=null;
-    for(let i=0;i<e.changedTouches.length;i++){if(e.changedTouches[i].identifier===touchDrawId){t=e.changedTouches[i];break;}}
-    const cx=t?t.clientX:0,cy=t?t.clientY:0;
-    endDraw(cx,cy,touchDrawId);
-    touchDrawId=null;
+    for(let i=0;i<e.changedTouches.length;i++){if(e.changedTouches[i].identifier===activeTouchId){t=e.changedTouches[i];break;}}
+    onDrawEnd(t?t.clientX:0,t?t.clientY:0);
+    activeTouchId=null;
   }
-  if(e.touches.length<2)touch2Start=null;
-  if(e.touches.length===0){touchDrawId=null;touchPanId=null;}
+  if(e.touches.length===0){activeTouchId=null;pinchStart=null;}
 },{passive:false});
 
 canvas.addEventListener('touchcancel',e=>{
   e.preventDefault();
-  if(isDrawing&&currentStroke){getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;activePointerId=null;}
-  touchDrawId=null;touchPanId=null;touch2Start=null;
+  if(isDrawing&&currentStroke){getActiveLayer().strokes.push(currentStroke);currentStroke=null;isDrawing=false;redrawAll();}
+  activeTouchId=null;pinchStart=null;
 },{passive:false});
 
 canvas.addEventListener('wheel',e=>{
